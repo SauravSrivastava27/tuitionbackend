@@ -31,7 +31,7 @@ router.post("/register", async (req, res) => {
     const secret = twoFactor.generateSecret({ name: "Tuition Management", account: username });
 
     const hashed = await bcrypt.hash(password, 10);
-    await User.create({ username, password: hashed, phone, twoFactorSecret: secret.secret });
+    await User.create({ username, password: hashed, phone, twoFactorSecret: secret.secret, role: req.body.role || "student", studentId: req.body.studentId || null });
 
     // Generate QR code as base64 image from the otpauth URI
     const qrCode = await QRCode.toDataURL(secret.uri);
@@ -86,7 +86,7 @@ router.post("/verify-otp", async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired code. Try again." });
 
     const token = jwt.sign(
-      { userId: user._id, username: user.username },
+      { userId: user._id, username: user.username, role: user.role, studentId: user.studentId },
       process.env.JWT_SECRET,
       { expiresIn: "15m" }
     );
@@ -94,6 +94,8 @@ router.post("/verify-otp", async (req, res) => {
     res.json({
       token,
       username: user.username,
+      role: user.role,
+      studentId: user.studentId,
       expiresIn: 900,
       loginAt: new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
     });
