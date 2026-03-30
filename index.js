@@ -27,6 +27,7 @@ const authMiddleware = require("./middleware/auth");
 
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/students", authMiddleware, require("./routes/studentRoutes"));
+app.use("/api/users", authMiddleware, require("./routes/userRoutes"));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
