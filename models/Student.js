@@ -7,7 +7,27 @@ const studentSchema = new mongoose.Schema({
   className:    { type: String, required: true },
   contactNo:    { type: String, required: true },
   fee:          { type: Number, required: true },
-  progress:     { type: String, default: "" },
+  joinDate:     { type: Date, default: Date.now },
+  status:       { type: String, enum: ["active", "inactive", "completed"], default: "active" },
+  feeStatus:    { type: String, enum: ["paid", "pending", "overdue"], default: "pending" },
+  progress: {
+    academicLevel: { type: String, default: "" },
+    performanceGrade: { type: String, enum: ["A", "B", "C", "D", "F", ""], default: "" },
+    lastReviewDate: { type: Date, default: null },
+  },
+  attendance: [
+    {
+      date: { type: Date, required: true },
+      present: { type: Boolean, default: true },
+    }
+  ],
+  subjects: [
+    {
+      name: { type: String, required: true },
+      grade: { type: String, enum: ["A", "B", "C", "D", "F", ""], default: "" },
+      marks: { type: Number, default: 0 },
+    }
+  ],
   notes: [
     {
       text:    { type: String, required: true },

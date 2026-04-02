@@ -1,11 +1,21 @@
-const { generateKeyPairSync, privateDecrypt, constants } = require("crypto");
+const { generateKeyPairSync, privateDecrypt, createPublicKey, constants } = require("crypto");
 
-// Generate RSA key pair once at server startup
-const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-  modulusLength: 2048,
-  publicKeyEncoding:  { type: "spki",  format: "pem" },
-  privateKeyEncoding: { type: "pkcs8", format: "pem" },
-});
+let privateKey, publicKey;
+
+if (process.env.RSA_PRIVATE_KEY) {
+  // Use fixed key from environment (production)
+  privateKey = process.env.RSA_PRIVATE_KEY.replace(/\\n/g, "\n");
+  publicKey = createPublicKey(privateKey).export({ type: "spki", format: "pem" });
+} else {
+  // Generate fresh key pair for local dev (keys last until server restarts)
+  const keyPair = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding:  { type: "spki",  format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  privateKey = keyPair.privateKey;
+  publicKey  = keyPair.publicKey;
+}
 
 const decrypt = (encryptedBase64) => {
   const buffer = Buffer.from(encryptedBase64, "base64");
