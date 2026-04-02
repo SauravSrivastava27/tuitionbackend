@@ -3,6 +3,47 @@ const User = require("../models/User");
 const adminMiddleware = require("../middleware/admin");
 const bcrypt = require("bcryptjs");
 
+// GET own profile (any authenticated user)
+router.get("/me", async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId, "-password -twoFactorSecret");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch profile" });
+  }
+});
+
+// PUT change own password (any authenticated user)
+router.put("/me/password", async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ message: "Current and new password are required" });
+
+    const { decrypt } = require("../utils/encryption");
+    const bcrypt = require("bcryptjs");
+
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const currentPlain = decrypt(currentPassword);
+    const match = await bcrypt.compare(currentPlain, user.password);
+    if (!match) return res.status(400).json({ message: "Current password is incorrect" });
+
+    const newPlain = decrypt(newPassword);
+    if (newPlain.length < 6)
+      return res.status(400).json({ message: "New password must be at least 6 characters" });
+
+    user.password = await bcrypt.hash(newPlain, 10);
+    await user.save();
+    res.json({ message: "Password changed successfully" });
+  } catch (err) {
+    console.error("Change password error:", err.message);
+    res.status(500).json({ message: "Failed to change password" });
+  }
+});
+
 // All routes here are admin only (with exception of profile/password for self access)
 router.use(adminMiddleware);
 

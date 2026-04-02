@@ -17,18 +17,11 @@ router.get("/dashboard", adminMiddleware, async (_req, res) => {
     ]);
 
     const paidFees = await Fee.aggregate([
-      { $match: { status: "paid" } },
-      { $group: { _id: null, total: { $sum: "$amount" } } }
+      { $group: { _id: null, total: { $sum: { $ifNull: ["$paidAmount", 0] } } } }
     ]);
 
-    const pendingFees = await Fee.aggregate([
-      { $match: { status: "pending" } },
-      { $group: { _id: null, total: { $sum: "$amount" } } }
-    ]);
-
-    const overdueFees = await Fee.aggregate([
-      { $match: { status: "overdue" } },
-      { $group: { _id: null, total: { $sum: "$amount" } } }
+    const remainingFees = await Fee.aggregate([
+      { $group: { _id: null, total: { $sum: { $subtract: ["$amount", { $ifNull: ["$paidAmount", 0] }] } } } }
     ]);
 
     const totalUsers = await User.countDocuments();
@@ -52,8 +45,7 @@ router.get("/dashboard", adminMiddleware, async (_req, res) => {
       fees: {
         total: totalFees[0]?.total || 0,
         paid: paidFees[0]?.total || 0,
-        pending: pendingFees[0]?.total || 0,
-        overdue: overdueFees[0]?.total || 0
+        remaining: remainingFees[0]?.total || 0,
       },
       users: {
         total: totalUsers,

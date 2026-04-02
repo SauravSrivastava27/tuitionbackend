@@ -351,4 +351,38 @@ router.post("/reset-password", async (req, res) => {
   }
 });
 
+// POST /api/auth/regenerate-2fa — regenerate 2FA secret for logged-in user
+router.post("/regenerate-2fa", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer "))
+      return res.status(401).json({ message: "No token provided" });
+
+    const jwt = require("jsonwebtoken");
+    const decoded = jwt.verify(authHeader.split(" ")[1], process.env.JWT_SECRET);
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const twoFactorResult = twoFactor.generateSecret({
+      name: `Tuition (${user.username})`,
+      issuer: "Tuition",
+    });
+
+    const qrCode = await QRCode.toDataURL(twoFactorResult.uri);
+
+    user.twoFactorSecret = twoFactorResult.secret;
+    await user.save();
+
+    res.json({
+      message: "2FA regenerated successfully. Scan the new QR code.",
+      qrCode,
+      secret: twoFactorResult.secret,
+    });
+  } catch (err) {
+    console.error("Regenerate 2FA error:", err.message);
+    res.status(500).json({ message: "Failed to regenerate 2FA" });
+  }
+});
+
 module.exports = router;

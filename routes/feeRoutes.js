@@ -6,7 +6,7 @@ const adminMiddleware = require("../middleware/admin");
 // Admin only — CREATE FEE RECORD
 router.post("/", adminMiddleware, async (req, res) => {
   try {
-    const { studentId, amount, dueDate, paymentMethod, notes } = req.body;
+    const { studentId, amount, paidAmount, dueDate, paymentMethod, notes } = req.body;
     if (!studentId || !amount || !dueDate)
       return res.status(400).json({ message: "studentId, amount, and dueDate are required" });
 
@@ -16,6 +16,7 @@ router.post("/", adminMiddleware, async (req, res) => {
     const fee = await Fee.create({
       studentId,
       amount,
+      paidAmount: paidAmount || 0,
       dueDate,
       paymentMethod: paymentMethod || "cash",
       notes: notes || ""
@@ -25,6 +26,20 @@ router.post("/", adminMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Create fee error:", err.message);
     res.status(500).json({ message: "Failed to create fee record" });
+  }
+});
+
+// GET own fees (student — uses studentId from JWT)
+router.get("/my", async (req, res) => {
+  try {
+    const studentId = req.user.studentId;
+    if (!studentId) return res.json({ fees: [], pagination: { total: 0 } });
+
+    const fees = await Fee.find({ studentId }).sort({ createdAt: -1 });
+    res.json({ fees });
+  } catch (err) {
+    console.error("Get my fees error:", err.message);
+    res.status(500).json({ message: "Failed to fetch fees" });
   }
 });
 
@@ -88,12 +103,14 @@ router.get("/summary", adminMiddleware, async (_req, res) => {
 // Admin only — UPDATE FEE RECORD
 router.put("/:id", adminMiddleware, async (req, res) => {
   try {
-    const { status, paidDate, paymentMethod, notes } = req.body;
+    const { status, paidDate, paymentMethod, notes, amount, paidAmount } = req.body;
     const update = {};
     if (status) update.status = status;
     if (paidDate) update.paidDate = paidDate;
     if (paymentMethod) update.paymentMethod = paymentMethod;
-    if (notes) update.notes = notes;
+    if (notes !== undefined) update.notes = notes;
+    if (amount !== undefined) update.amount = amount;
+    if (paidAmount !== undefined) update.paidAmount = paidAmount;
 
     const fee = await Fee.findByIdAndUpdate(req.params.id, update, { new: true });
     if (!fee) return res.status(404).json({ message: "Fee record not found" });
