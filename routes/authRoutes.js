@@ -38,8 +38,10 @@ router.post("/register", async (req, res) => {
       const adminCodeRecord = await AdminCode.findOne({
         code: adminCode,
         isActive: true,
-        usedBy: null,
-        $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $gt: new Date() }, usedBy: null }
+        ]
       });
 
       if (!adminCodeRecord) {
