@@ -32,6 +32,7 @@ router.post("/register", async (req, res) => {
     // Determine user role based on admin code
     let userRole = "student";
     let usedAdminCode = null;
+    let adminCodeDaysRemaining = null;
 
     if (adminCode) {
       const adminCodeRecord = await AdminCode.findOne({
@@ -47,6 +48,9 @@ router.post("/register", async (req, res) => {
 
       userRole = "admin";
       usedAdminCode = adminCodeRecord._id;
+      if (adminCodeRecord.expiresAt) {
+        adminCodeDaysRemaining = Math.ceil((adminCodeRecord.expiresAt - new Date()) / (1000 * 60 * 60 * 24));
+      }
     }
 
     // Generate 2FA secret (MANDATORY)
@@ -63,6 +67,7 @@ router.post("/register", async (req, res) => {
       message: "Scan the QR code with Google Authenticator or Authy to complete registration",
       qrCode,
       tempSecret,
+      daysRemaining: adminCodeDaysRemaining,
       registrationData: {
         username,
         password: hashedPassword,

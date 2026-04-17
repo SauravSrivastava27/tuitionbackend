@@ -26,11 +26,13 @@ router.post("/", async (req, res) => {
 
     const code = crypto.randomBytes(16).toString("hex"); // random 32-char hex code
 
+    const defaultExpiry = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000); // 10 days from now
+
     const adminCode = await AdminCode.create({
       code,
       createdBy: req.user.userId,
       isActive: true,
-      expiresAt: expiresAt || null,
+      expiresAt: expiresAt || defaultExpiry,
       notes: notes || "",
     });
 
