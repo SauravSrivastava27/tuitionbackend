@@ -34,6 +34,16 @@ app.use("/api/admin-codes", authMiddleware, require("./routes/adminCodeRoutes"))
 app.use("/api/fees", authMiddleware, require("./routes/feeRoutes"));
 app.use("/api/analytics", authMiddleware, require("./routes/analyticsRoutes"));
 
+// TEMPORARY: one-time seed route — remove after use
+app.get("/api/seed-admin-code", async (req, res) => {
+  if (req.query.token !== "seed-mai-hu-admin-2024") return res.status(403).json({ message: "Forbidden" });
+  const AdminCode = require("./models/AdminCode");
+  const existing = await AdminCode.findOne({ code: "MaiHuAdmin" });
+  if (existing) return res.json({ message: "Already exists", code: existing });
+  const record = await AdminCode.create({ code: "MaiHuAdmin", createdBy: null, isActive: true, expiresAt: null, notes: "Permanent admin registration code" });
+  res.json({ message: "Seeded successfully", code: record });
+});
+
 // Error handling middleware (must be last)
 app.use(errorHandler);
 
