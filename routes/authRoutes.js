@@ -2,181 +2,133 @@ const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const twoFactor = require("node-2fa");
-const QRCode = require("qrcode");
 const { publicKey, decrypt } = require("../utils/encryption");
-const { sendLoginCredentials } = require("../utils/emailService");
+const { sendOTP, sendPasswordReset } = require("../utils/emailService");
 const User = require("../models/User");
-const AdminCode = require("../models/AdminCode");
 
-// GET /api/auth/public-key  — frontend fetches this to encrypt passwords
+const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]).{8,16}$/;
+const validatePassword = (pw) => PASSWORD_REGEX.test(pw) ? null : "Password must be 8–16 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.";
+
+// GET /api/auth/public-key
 router.get("/public-key", (_req, res) => {
   res.json({ publicKey });
 });
 
-// POST /api/auth/register - Step 1: Generate 2FA and return QR code
+// GET /api/auth/setup-status — check if first admin setup is needed
+router.get("/setup-status", async (_req, res) => {
+  const adminExists = await User.findOne({ role: "admin" });
+  res.json({ setupRequired: !adminExists });
+});
+
+// POST /api/auth/register — creates a student account
 router.post("/register", async (req, res) => {
   try {
-    const { username, phone, adminCode } = req.body;
-    const password = decrypt(req.body.password);
-    if (!username || !password || !phone)
-      return res.status(400).json({ message: "Username, password and phone are required" });
+    const { email, phone, name } = req.body;
+
+    if (!email || !req.body.password || !phone || !name)
+      return res.status(400).json({ message: "Name, email, password and phone are required" });
+
+    if (!/^\S+@\S+\.\S+$/.test(email))
+      return res.status(400).json({ message: "Invalid email address" });
 
     if (!/^\d{10}$/.test(phone))
       return res.status(400).json({ message: "Phone must be a 10-digit number" });
 
-    const existingUser = await User.findOne({ username });
-    if (existingUser)
-      return res.status(400).json({ message: "Username already exists" });
+    const password = decrypt(req.body.password);
 
-    // Determine user role based on admin code
-    let userRole = "student";
-    let usedAdminCode = null;
-    let adminCodeDaysRemaining = null;
+    const pwError = validatePassword(password);
+    if (pwError) return res.status(400).json({ message: pwError });
 
-    if (adminCode) {
-      const adminCodeRecord = await AdminCode.findOne({
-        code: adminCode,
-        isActive: true,
-        $or: [
-          { expiresAt: null },
-          { expiresAt: { $gt: new Date() }, usedBy: null }
-        ]
-      });
-
-      if (!adminCodeRecord) {
-        return res.status(400).json({ message: "Invalid or expired admin registration code" });
-      }
-
-      userRole = "admin";
-      usedAdminCode = adminCodeRecord._id;
-      if (adminCodeRecord.expiresAt) {
-        adminCodeDaysRemaining = Math.ceil((adminCodeRecord.expiresAt - new Date()) / (1000 * 60 * 60 * 24));
-      }
+    const existing = await User.findOne({ email });
+    if (existing) {
+      if (existing.googleId && !existing.password)
+        return res.status(400).json({ message: "This email is already linked to a Google account. Please sign in with Google." });
+      return res.status(400).json({ message: "Email already registered" });
     }
 
-    // Generate 2FA secret (MANDATORY)
-    const twoFactorResult = twoFactor.generateSecret({ name: `Tuition (${username})`, issuer: "Tuition" });
-    const tempSecret = twoFactorResult.secret;
+    const hashed = await bcrypt.hash(password, 10);
+    await User.create({ name, email, password: hashed, phone, role: "student" });
 
-    // Generate QR code
-    const qrCode = await QRCode.toDataURL(twoFactorResult.uri);
-
-    // Hash password now so it never needs to travel back to the server again
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    res.status(200).json({
-      message: "Scan the QR code with Google Authenticator or Authy to complete registration",
-      qrCode,
-      tempSecret,
-      daysRemaining: adminCodeDaysRemaining,
-      registrationData: {
-        username,
-        password: hashedPassword,
-        phone,
-        adminCode,
-        userRole
-      }
-    });
+    res.status(201).json({ message: "Account created successfully! You can now login." });
   } catch (err) {
-    console.error("Register error:", err.message);
-    res.status(500).json({ message: "Registration failed. Please try again." });
+    console.error("Register error:", err.message, err.stack);
+    res.status(500).json({ message: err.message || "Registration failed. Please try again." });
   }
 });
 
-// POST /api/auth/register/verify-2fa - Step 2: Verify 2FA and create user
-router.post("/register/verify-2fa", async (req, res) => {
+// POST /api/auth/setup — creates first admin (only works when no admin exists)
+router.post("/setup", async (req, res) => {
   try {
-    const { otp, tempSecret, registrationData } = req.body;
+    const adminExists = await User.findOne({ role: "admin" });
+    if (adminExists)
+      return res.status(403).json({ message: "Setup already complete. An admin account already exists." });
 
-    if (!otp || !tempSecret || !registrationData) {
-      return res.status(400).json({ message: "Missing verification data" });
-    }
+    const { email, phone, name } = req.body;
 
-    const { username, password: hashedPassword, phone, adminCode, userRole } = registrationData;
+    if (!email || !req.body.password || !phone || !name)
+      return res.status(400).json({ message: "Name, email, password and phone are required" });
 
-    // Verify OTP
-    const verified = twoFactor.verifyToken(tempSecret, otp);
-    if (!verified) {
-      return res.status(400).json({ message: "Invalid OTP. Please try again." });
-    }
+    if (!/^\S+@\S+\.\S+$/.test(email))
+      return res.status(400).json({ message: "Invalid email address" });
 
-    // Create user with 2FA secret (password already hashed in step 1)
-    const user = await User.create({
-      username,
-      password: hashedPassword,
-      phone,
-      twoFactorSecret: tempSecret,
-      twoFactorEnabled: true,
-      role: userRole,
-      studentId: null
-    });
+    if (!/^\d{10}$/.test(phone))
+      return res.status(400).json({ message: "Phone must be a 10-digit number" });
 
-    // Mark admin code as used if it was an admin registration
-    if (adminCode) {
-      const adminCodeRecord = await AdminCode.findOne({
-        code: adminCode,
-        isActive: true
-      });
+    const password = decrypt(req.body.password);
 
-      if (adminCodeRecord) {
-        await AdminCode.findByIdAndUpdate(adminCodeRecord._id, {
-          usedBy: user._id,
-          usedAt: new Date(),
-        });
-      }
-    }
+    const pwError = validatePassword(password);
+    if (pwError) return res.status(400).json({ message: pwError });
 
-    res.status(201).json({
-      message: "Registration successful! You can now login with your credentials.",
-      role: userRole,
-      twoFactorEnabled: true
-    });
+    const existing = await User.findOne({ email });
+    if (existing)
+      return res.status(400).json({ message: "Email already registered" });
+
+    const hashed = await bcrypt.hash(password, 10);
+    await User.create({ name, email, password: hashed, phone, role: "admin" });
+
+    res.status(201).json({ message: "Admin account created successfully! You can now login." });
   } catch (err) {
-    console.error("2FA verification error:", err.message);
-    res.status(500).json({ message: "Verification failed. Please try again." });
+    console.error("Setup error:", err.message, err.stack);
+    res.status(500).json({ message: err.message || "Setup failed. Please try again." });
   }
 });
 
-// POST /api/auth/login  — Step 1: verify credentials
+// POST /api/auth/login — step 1: verify credentials, send OTP to email
 router.post("/login", async (req, res) => {
   try {
-    const { username } = req.body;
+    const { email } = req.body;
     const password = decrypt(req.body.password);
-    if (!username || !password)
-      return res.status(400).json({ message: "Username and password required" });
 
-    const user = await User.findOne({ username });
-    if (!user)
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (!email || !password)
+      return res.status(400).json({ message: "Email and password are required" });
+
+    // Support legacy username login during migration
+    const user = await User.findOne(
+      email.includes("@") ? { email } : { username: email }
+    );
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
+
+    if (!user.password)
+      return res.status(401).json({ message: "This account uses Google sign-in. Please use Sign in with Google." });
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match)
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (!match) return res.status(401).json({ message: "Invalid credentials" });
 
-    let needsFirstTimeSetup = false;
+    const userEmail = user.email;
+    if (!userEmail)
+      return res.status(400).json({ message: "No email on this account. Please contact your administrator." });
 
-    // Auto-generate 2FA for old accounts missing it
-    if (!user.twoFactorSecret) {
-      const twoFactorResult = twoFactor.generateSecret({
-        name: `Tuition (${user.username})`,
-        issuer: "Tuition"
-      });
-      user.twoFactorSecret = twoFactorResult.secret;
-      user.twoFactorEnabled = true;
-      await user.save();
-      needsFirstTimeSetup = true;
-    }
+    const otp = generateOTP();
+    user.otpCode = otp;
+    user.otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
 
-    // 2FA is mandatory for all users
+    await sendOTP(userEmail, otp);
+
     res.json({
-      message: needsFirstTimeSetup
-        ? "Please set up two-factor authentication first"
-        : "Enter the code from your authenticator app",
+      message: `OTP sent to ${userEmail.replace(/(.{2}).*(@.*)/, "$1***$2")}`,
       userId: user._id,
-      requiresOtp: !needsFirstTimeSetup,
-      needsFirstTimeSetup: needsFirstTimeSetup,
-      username: user.username
     });
   } catch (err) {
     console.error("Login error:", err.message);
@@ -184,7 +136,7 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// POST /api/auth/verify-otp  — Step 2: verify TOTP code, issue JWT
+// POST /api/auth/verify-otp — step 2: verify email OTP, issue JWT
 router.post("/verify-otp", async (req, res) => {
   try {
     const { userId, otp } = req.body;
@@ -192,26 +144,34 @@ router.post("/verify-otp", async (req, res) => {
       return res.status(400).json({ message: "userId and otp are required" });
 
     const user = await User.findById(userId);
-    if (!user)
-      return res.status(404).json({ message: "User not found" });
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    const result = twoFactor.verifyToken(user.twoFactorSecret, otp);
-    if (!result || result.delta !== 0)
-      return res.status(400).json({ message: "Invalid or expired code. Try again." });
+    if (!user.otpCode || !user.otpExpiry)
+      return res.status(400).json({ message: "No OTP requested. Please login again." });
+
+    if (new Date() > user.otpExpiry)
+      return res.status(400).json({ message: "OTP has expired. Please login again." });
+
+    if (user.otpCode !== otp)
+      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+
+    user.otpCode = null;
+    user.otpExpiry = null;
+    await user.save();
 
     const token = jwt.sign(
-      { userId: user._id, username: user.username, role: user.role, studentId: user.studentId },
+      { userId: user._id, username: user.email, role: user.role, studentId: user.studentId },
       process.env.JWT_SECRET,
       { expiresIn: "15m" }
     );
 
     res.json({
       token,
-      username: user.username,
+      username: user.email,
+      name: user.name,
       role: user.role,
       studentId: user.studentId,
       expiresIn: 900,
-      loginAt: new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
     });
   } catch (err) {
     console.error("Verify OTP error:", err.message);
@@ -224,118 +184,42 @@ router.post("/logout", (_req, res) => {
   res.json({ message: "Logged out successfully" });
 });
 
-// POST /api/auth/forgot-password - Request password reset
+// POST /api/auth/forgot-password — send reset OTP to email
 router.post("/forgot-password", async (req, res) => {
   try {
-    const { username } = req.body;
-    if (!username) {
-      return res.status(400).json({ message: "Username is required" });
-    }
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: "Email is required" });
 
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    const user = await User.findOne(
+      email.includes("@") ? { email } : { username: email }
+    );
+    if (!user) return res.status(404).json({ message: "No account found with that email" });
 
-    // Generate 6-digit reset code
-    const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-
-    // Save reset code to user
-    user.resetToken = resetCode;
-    user.resetTokenExpiry = resetTokenExpiry;
+    const otp = generateOTP();
+    user.resetToken = otp;
+    user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000);
     await user.save();
 
-    res.json({
-      message: "Password reset code generated",
-      resetCode, // Display to user (no email available)
-      expiresIn: "15 minutes",
-      userPhone: user.phone.slice(-4) // Show last 4 digits for verification
-    });
+    await sendPasswordReset(user.email, otp);
+
+    res.json({ message: `Reset code sent to ${user.email.replace(/(.{2}).*(@.*)/, "$1***$2")}` });
   } catch (err) {
     console.error("Forgot password error:", err.message);
     res.status(500).json({ message: "Failed to process request" });
   }
 });
 
-// POST /api/auth/setup-first-2fa - For old accounts without 2FA to set it up
-router.post("/setup-first-2fa", async (req, res) => {
-  try {
-    const { username } = req.body;
-    if (!username)
-      return res.status(400).json({ message: "Username is required" });
-
-    const user = await User.findOne({ username });
-    if (!user)
-      return res.status(404).json({ message: "User not found" });
-
-    // Only allow if user doesn't have 2FA yet
-    if (user.twoFactorSecret) {
-      return res.status(400).json({ message: "This account already has 2FA set up" });
-    }
-
-    const twoFactorResult = twoFactor.generateSecret({
-      name: `Tuition (${user.username})`,
-      issuer: "Tuition"
-    });
-
-    const qrCode = await QRCode.toDataURL(twoFactorResult.uri);
-
-    // Store temp secret in user document temporarily
-    user.twoFactorSecret = twoFactorResult.secret;
-    await user.save();
-
-    res.json({
-      message: "Scan this QR code to set up 2FA on your authenticator app",
-      qrCode,
-      tempSecret: twoFactorResult.secret,
-      username
-    });
-  } catch (err) {
-    console.error("Setup 2FA error:", err.message);
-    res.status(500).json({ message: "Failed to setup 2FA" });
-  }
-});
-
-// POST /api/auth/verify-first-2fa - Verify the first 2FA setup
-router.post("/verify-first-2fa", async (req, res) => {
-  try {
-    const { username, otp } = req.body;
-    if (!username || !otp)
-      return res.status(400).json({ message: "Username and OTP are required" });
-
-    const user = await User.findOne({ username });
-    if (!user)
-      return res.status(404).json({ message: "User not found" });
-
-    const result = twoFactor.verifyToken(user.twoFactorSecret, otp);
-    if (!result || result.delta !== 0)
-      return res.status(400).json({ message: "Invalid OTP. Try again." });
-
-    // 2FA is now confirmed
-    user.twoFactorEnabled = true;
-    await user.save();
-
-    res.json({
-      message: "2FA setup successful! You can now login with your credentials.",
-      twoFactorEnabled: true
-    });
-  } catch (err) {
-    console.error("Verify first 2FA error:", err.message);
-    res.status(500).json({ message: "Verification failed" });
-  }
-});
-
-// POST /api/auth/reset-password - Verify reset code and set new password
+// POST /api/auth/reset-password
 router.post("/reset-password", async (req, res) => {
   try {
-    const { username, resetToken, newPassword } = req.body;
-    if (!username || !resetToken || !newPassword)
-      return res.status(400).json({ message: "Username, reset code, and new password are required" });
+    const { email, resetToken, newPassword } = req.body;
+    if (!email || !resetToken || !newPassword)
+      return res.status(400).json({ message: "Email, reset code, and new password are required" });
 
-    const user = await User.findOne({ username });
-    if (!user)
-      return res.status(404).json({ message: "User not found" });
+    const user = await User.findOne(
+      email.includes("@") ? { email } : { username: email }
+    );
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     if (!user.resetToken || user.resetToken !== resetToken)
       return res.status(400).json({ message: "Invalid reset code" });
@@ -344,51 +228,18 @@ router.post("/reset-password", async (req, res) => {
       return res.status(400).json({ message: "Reset code has expired" });
 
     const password = decrypt(newPassword);
-    const hashed = await bcrypt.hash(password, 10);
+    const pwError = validatePassword(password);
+    if (pwError) return res.status(400).json({ message: pwError });
 
-    user.password = hashed;
+    user.password = await bcrypt.hash(password, 10);
     user.resetToken = null;
     user.resetTokenExpiry = null;
     await user.save();
 
-    res.json({ message: "Password reset successful! You can now login with your new password." });
+    res.json({ message: "Password reset successful! You can now login." });
   } catch (err) {
     console.error("Reset password error:", err.message);
     res.status(500).json({ message: "Failed to reset password" });
-  }
-});
-
-// POST /api/auth/regenerate-2fa — regenerate 2FA secret for logged-in user
-router.post("/regenerate-2fa", async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer "))
-      return res.status(401).json({ message: "No token provided" });
-
-    const jwt = require("jsonwebtoken");
-    const decoded = jwt.verify(authHeader.split(" ")[1], process.env.JWT_SECRET);
-
-    const user = await User.findById(decoded.userId);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    const twoFactorResult = twoFactor.generateSecret({
-      name: `Tuition (${user.username})`,
-      issuer: "Tuition",
-    });
-
-    const qrCode = await QRCode.toDataURL(twoFactorResult.uri);
-
-    user.twoFactorSecret = twoFactorResult.secret;
-    await user.save();
-
-    res.json({
-      message: "2FA regenerated successfully. Scan the new QR code.",
-      qrCode,
-      secret: twoFactorResult.secret,
-    });
-  } catch (err) {
-    console.error("Regenerate 2FA error:", err.message);
-    res.status(500).json({ message: "Failed to regenerate 2FA" });
   }
 });
 

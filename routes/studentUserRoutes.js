@@ -24,6 +24,8 @@ router.get("/student/:studentId/user-status", adminMiddleware, async (req, res) 
       user: user ? {
         _id: user._id,
         username: user.username,
+        email: user.email,
+        name: user.name,
         role: user.role
       } : null
     });
@@ -57,9 +59,12 @@ router.put("/link", adminMiddleware, async (req, res) => {
     user.role = "student";
     await user.save();
 
+    student.email = user.email;
+    await student.save();
+
     res.json({
-      message: `User "${user.username}" linked to student "${student.name}"`,
-      user: { _id: user._id, username: user.username, role: user.role, studentId: user.studentId }
+      message: `User linked to student "${student.name}"`,
+      user: { _id: user._id, email: user.email, name: user.name, role: user.role, studentId: user.studentId }
     });
   } catch (err) {
     console.error("Link user error:", err.message);
@@ -74,10 +79,14 @@ router.put("/unlink/:userId", adminMiddleware, async (req, res) => {
     if (!user)
       return res.status(404).json({ message: "User not found" });
 
+    if (user.studentId) {
+      await Student.findByIdAndUpdate(user.studentId, { email: null });
+    }
+
     user.studentId = null;
     await user.save();
 
-    res.json({ message: `User "${user.username}" unlinked from student` });
+    res.json({ message: "User unlinked from student" });
   } catch (err) {
     console.error("Unlink user error:", err.message);
     res.status(500).json({ message: "Failed to unlink user" });
