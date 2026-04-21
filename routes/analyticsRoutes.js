@@ -7,57 +7,68 @@ const adminMiddleware = require("../middleware/admin");
 // Admin only — DASHBOARD STATS
 router.get("/dashboard", adminMiddleware, async (_req, res) => {
   try {
-    const totalStudents = await Student.countDocuments();
-    const activeStudents = await Student.countDocuments({ status: "active" });
-    const completedStudents = await Student.countDocuments({ status: "completed" });
-    const inactiveStudents = await Student.countDocuments({ status: "inactive" });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const totalFees = await Fee.aggregate([
-      { $group: { _id: null, total: { $sum: "$amount" } } }
+    const [
+      totalStudents, activeStudents, completedStudents, inactiveStudents,
+      totalUsers, adminUsers, studentUsers,
+      feeTotals, feeStatusCounts,
+      recentStudents, recentFees,
+    ] = await Promise.all([
+      Student.countDocuments(),
+      Student.countDocuments({ status: "active" }),
+      Student.countDocuments({ status: "completed" }),
+      Student.countDocuments({ status: "inactive" }),
+      User.countDocuments(),
+      User.countDocuments({ role: "admin" }),
+      User.countDocuments({ role: "student" }),
+      // Correct: sum amount billed vs paidAmount actually received
+      Fee.aggregate([
+        { $group: { _id: null, billed: { $sum: "$amount" }, collected: { $sum: { $ifNull: ["$paidAmount", 0] } } } }
+      ]),
+      Fee.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } }
+      ]),
+      Student.find().sort({ createdAt: -1 }).limit(5).select("name status fee joinDate createdAt"),
+      Fee.find().sort({ createdAt: -1 }).limit(5)
+        .populate("studentId", "name")
+        .select("amount paidAmount status paidDate dueDate studentId createdAt"),
     ]);
 
-    const paidFees = await Fee.aggregate([
-      { $group: { _id: null, total: { $sum: { $ifNull: ["$paidAmount", 0] } } } }
-    ]);
-
-    const remainingFees = await Fee.aggregate([
-      { $group: { _id: null, total: { $sum: { $subtract: ["$amount", { $ifNull: ["$paidAmount", 0] }] } } } }
-    ]);
-
-    const totalUsers = await User.countDocuments();
-    const adminUsers = await User.countDocuments({ role: "admin" });
-    const studentUsers = await User.countDocuments({ role: "student" });
-
-    // Get recently created users (last 5)
-    const recentlyCreatedUsers = await User.find({ role: "student" })
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .populate("studentId", "name")
-      .select("username createdAt studentId");
+    const billed    = feeTotals[0]?.billed    || 0;
+    const collected = feeTotals[0]?.collected || 0;
+    const statusMap = {};
+    feeStatusCounts.forEach(f => { statusMap[f._id] = f.count; });
 
     res.json({
-      students: {
-        total: totalStudents,
-        active: activeStudents,
-        completed: completedStudents,
-        inactive: inactiveStudents
-      },
+      students: { total: totalStudents, active: activeStudents, completed: completedStudents, inactive: inactiveStudents },
       fees: {
-        total: totalFees[0]?.total || 0,
-        paid: paidFees[0]?.total || 0,
-        remaining: remainingFees[0]?.total || 0,
+        total: billed,
+        paid: collected,
+        remaining: billed - collected,
+        overdueCount:  statusMap["overdue"]  || 0,
+        pendingCount:  statusMap["pending"]  || 0,
+        paidCount:     statusMap["paid"]     || 0,
+        collectionRate: billed > 0 ? Math.round((collected / billed) * 100) : 0,
       },
-      users: {
-        total: totalUsers,
-        admin: adminUsers,
-        student: studentUsers
-      },
-      recentlyCreatedUsers: recentlyCreatedUsers.map(user => ({
-        _id: user._id,
-        username: user.username,
-        studentName: user.studentId?.name || "Unknown",
-        createdAt: user.createdAt
-      }))
+      users: { total: totalUsers, admin: adminUsers, student: studentUsers },
+      recentStudents: recentStudents.map(s => ({
+        _id: s._id, name: s.name, status: s.status, fee: s.fee,
+        joinDate: s.joinDate || s.createdAt,
+      })),
+      recentFees: recentFees.map(f => ({
+        _id: f._id,
+        studentName: f.studentId?.name || "Unknown",
+        amount: f.amount,
+        paidAmount: f.paidAmount || 0,
+        status: f.status,
+        dueDate: f.dueDate,
+        paidDate: f.paidDate,
+        createdAt: f.createdAt,
+      })),
     });
   } catch (err) {
     console.error("Dashboard stats error:", err.message);
